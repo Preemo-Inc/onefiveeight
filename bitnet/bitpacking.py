@@ -23,7 +23,8 @@ class BitPack:
     def pack_2bit_u8(W_q: Tensor) -> Tensor:  # uint8 > uint8/4
         """
         pack a stack of 4x ternary {-1,0,1} weights into
-        2-bit weights, hidden as a single uint8 tensor
+        2-bit weights, hidden as a single uint8 tensor.
+        Theoretically, could also pack 5x ternary weights
         """
         W_q = (W_q + 1).to(uint8)
         _step = int(len(W_q) / 4)

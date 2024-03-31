@@ -2,9 +2,10 @@ from torch import Tensor
 import torch
 import torch.nn as nn
 
+# from .bitpacking import BitPack
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-5):
+    def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         """
         Paper: https://arxiv.org/abs/1910.07467
@@ -25,7 +26,7 @@ def _activation_quant(x: Tensor) -> Tensor:
     scale: Tensor = 127.0 / x.abs().max(dim=1, keepdim=True).values.clamp(min=1e-5)
     # round to int8
     y: Tensor = (x * scale).round().clamp(-128, 127) / scale
-    return x + (y - x).detach()
+    return x + (y - x).detach() # = y, but with changed 
 
 
 def _weight_quant(w: Tensor) -> tuple[Tensor, Tensor]:
@@ -33,7 +34,7 @@ def _weight_quant(w: Tensor) -> tuple[Tensor, Tensor]:
     # round to 1.58Bit
     quant: Tensor = (w * scale).round().clamp(-1, 1) / scale
     w_quant: Tensor = w + (quant - w).detach()
-    scale = abs(w_quant).max().detach()
+    scale = w_quant.abs().max().detach()
     w_quant = w_quant / scale
     return w_quant, scale
 
@@ -43,15 +44,20 @@ class BitLinear(nn.Linear):
         super(BitLinear, self).__init__(*args, **kwargs)
         self.rms_norm = RMSNorm(self.in_features)
 
-    @torch.compile 
-    def forward(self, x: Tensor) -> Tensor:
+    def _forward(self, x: Tensor, weight: Tensor) -> Tensor:
         x_norm = self.rms_norm(x)
         x_quant = _activation_quant(x_norm)
-        w_quant, scale = _weight_quant(self.weight)
+        w_quant, scale = _weight_quant(weight)
         
         output = nn.functional.linear(x_quant, w_quant)
-        return output * scale      
+        return output * scale
         
+    def forward(self, x: Tensor) -> Tensor:
+        return self._forward(x, self.weight)
+           
+
+
+
 def _get_bitlinear(linear: nn.Linear):
     
     weight = linear.weight
