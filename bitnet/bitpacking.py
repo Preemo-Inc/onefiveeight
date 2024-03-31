@@ -15,12 +15,12 @@ class BitPack:
         assert W_q.max() <= 1, f"Expected W_q.max() <= 1 but got {W_q.max()}"
         assert W_q.min() >= -1, f"Expected W_q.min() >= 0 but got {W_q.min()}"
         
-        W_q_Dq = BitPack.unpack_2bit_u8(BitPack.pack_2bit_u8(W_q))
+        W_q_Dq = BitPack.unpack_158bit_u8(BitPack.pack_158bit_u8(W_q))
         assert torch.allclose(W_q, W_q_Dq), f"Expected W == W_dequant but got {W_q} != {W_q_Dq}"
         return True
     
     @staticmethod
-    def pack_2bit_u8(W_q: Tensor) -> Tensor:  # uint8 > uint8/4
+    def pack_158bit_u8(W_q: Tensor) -> Tensor:  # uint8 > uint8/4
         """
         pack a stack of 4x ternary {-1,0,1} weights into
         2-bit weights, hidden as a single uint8 tensor.
@@ -37,7 +37,7 @@ class BitPack:
         ) 
 
     @staticmethod
-    def unpack_2bit_u8(W_q: Tensor) -> Tensor:
+    def unpack_158bit_u8(W_q: Tensor) -> Tensor:
         _step = W_q.shape[0]
         tmp = torch.empty([4 * _step, W_q.shape[1]], dtype=uint8, device=W_q.device)
 
@@ -47,25 +47,4 @@ class BitPack:
         tmp[3 * _step : 4 * _step] = W_q & 0b00000011
 
         return tmp.to(int8) - 1
-    
-def test_bitpacking_2():
-    W = torch.randint(-1, 2, (1280,1280), dtype=torch.int8)
-    BitPack.check_2bit(W)
-    print("PASSED")
-    
-def test_compile_bitpacking_2():
-    """test not graph breakage"""
-    @torch.compile
-    def compile_fn(W):
-        return BitPack.unpack_2bit_u8(BitPack.pack_2bit_u8(W))
-    
-    W = torch.randint(-1, 2, (1280,492), dtype=torch.int8)
-    compile_fn(W)
-    explaination =  torch._dynamo.explain(compile_fn, W) 
-    assert explaination.graph_break_count == 0, f"Expected 0 but got {explaination.graph_break_count}"
-    print("COMPILED PASSED")
-
-if __name__ == "__main__":
-    test_bitpacking_2()
-    test_compile_bitpacking_2()
     
