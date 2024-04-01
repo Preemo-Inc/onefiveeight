@@ -23,20 +23,25 @@ class RMSNorm(nn.Module):
 
 
 def _activation_quant(x: Tensor) -> Tensor:
+    # with torch.compile: # check if two lines can be wrapped with no_grad
     scale: Tensor = 127.0 / x.abs().max(dim=1, keepdim=True).values.clamp(min=1e-5)
     # round to int8
     y: Tensor = (x * scale).round().clamp(-128, 127) / scale
-    return x + (y - x).detach() # = y, but with changed 
+    # project the quantized value back to the original x
+    # without preserving the gradient
+    # similar to L1 regularization
+    return x + (y - x).detach() 
 
 
 def _weight_quant(w: Tensor) -> tuple[Tensor, Tensor]:
+    # with torch.no_grad(): # check if two lines below can be wrapped with no_grad
     scale: Tensor = 1.0 / w.abs().mean().clamp(min=1e-5)
     # round to 1.58Bit
     quant: Tensor = (w * scale).round().clamp(-1, 1) / scale
     w_quant: Tensor = w + (quant - w).detach()
-    scale = w_quant.abs().max().detach()
+    scale_scalar = w_quant.abs().max().detach()
     w_quant = w_quant / scale
-    return w_quant, scale
+    return w_quant, scale_scalar
 
 class BitLinear(nn.Linear):
     def __init__(self, *args, **kwargs):
