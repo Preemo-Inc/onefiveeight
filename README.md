@@ -23,3 +23,13 @@ cd hqq && pip install -e .
 # HQQ -> 1.58
 - [ ] test HQQ -> fork -> 1.58bit 
 - [ ] 2bit quant llama / bitsandbytes
+
+# Eval Results 
+
+| Model                     | Dataset                                                  | Quant    | Groupsize | PPL    |
+|---------------------------|----------------------------------------------------------|----------|-----------|--------|
+| TheBloke/Llama-2-7B-fp16  | wikitext + wikitext_wikitext-2-raw-v1, validation splits | HQQ 1.58 | 16        | 445.03 |
+| TheBloke/Llama-2-7B-fp16  | wikitext + wikitext_wikitext-2-raw-v1, validation splits | HQQ 1.58 | 8         | 113.97 |
+| TheBloke/Llama-2-7B-fp16  | wikitext + wikitext_wikitext-2-raw-v1, validation splits | FP16     | -         | 70.67  |
+| TheBloke/Llama-2-13B-fp16 | wikitext + wikitext_wikitext-2-raw-v1, validation splits | HQQ 1.58 | 16        | 232.75 |
+| TheBloke/Llama-2-13B-fp16 | wikitext + wikitext_wikitext-2-raw-v1, validation splits | HQQ 1.58 | 8         | 165.08 |
