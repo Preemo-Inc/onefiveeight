@@ -183,8 +183,8 @@ class Quantizer:
                 )
         else:
             W_r = W_q.to(compute_dtype)
-        W_r = ((W_r - meta["zero"]) * meta["scale"]).reshape(meta["shape"])
-        return W_r
+        W_r_scaled = ((W_r - meta["zero"]) * meta["scale"]).reshape(meta["shape"])
+        return W_r_scaled
 
     @classmethod
     def to_inplace(cls, W_q: Tensor, meta: dict, device) -> tuple:

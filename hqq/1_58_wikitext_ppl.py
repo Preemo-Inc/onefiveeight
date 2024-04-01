@@ -1,6 +1,6 @@
 import argparse
 
-from datasets import load_dataset, Dataset
+from datasets import load_dataset
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -109,7 +109,8 @@ def compute_perplexity_batched(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="TheBloke/Llama-2-7B-fp16")
-    parser.add_argument("--use_quant", type=bool, required=True)
+    parser.add_argument("--use_quant", type=bool, default=True)
+    parser.add_argument("--group_size", type=int, default=16)
 
     args = parser.parse_args()
 
@@ -138,7 +139,7 @@ if __name__ == "__main__":
         ######################
         from hqq.core.quantize import *
 
-        quant_config = BaseQuantizeConfig(nbits=1.58, group_size=16)
+        quant_config = BaseQuantizeConfig(nbits=1.58, group_size=args.group_size)
         model.quantize_model(
             quant_config=quant_config, compute_dtype=compute_dtype, device=device
         )
@@ -148,7 +149,7 @@ if __name__ == "__main__":
     model.eval()
 
 print(
-    f"{'HQQ 1.58' if args.use_quant else 'FP16':20s} perplexity:",
+    f"{model} with {f'HQQ 1.58-gs{args.group_size}' if args.use_quant else 'FP16':20s} perplexity:",
     compute_perplexity_batched(
         model=model,
         tokenizer=tokenizer,
@@ -157,4 +158,8 @@ print(
         max_length=max_tokens,
         device=device,
     ),
-)  # Prints "HQQ 1.58 perplexity 444.4851"
+)  
+# Results:
+# "HQQ 1.58-group-size-16 perplexity 445.027" 
+# "HQQ 1.58-group-size-8 perplexity: 113.9714" 
+# "FP16                  perplexity: 70.67"
