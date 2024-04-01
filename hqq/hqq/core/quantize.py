@@ -12,7 +12,7 @@ from .bitpack import BitPack
 
 # Main HQQ Quantizer
 class Quantizer:
-    SUPPORTED_BITS = [8, 4, 3, 2, 1]
+    SUPPORTED_BITS: list[int | float] = [8, 4, 3, 2, 1.58, 1]
     optimize_weights = optimize_weights_proximal
 
     bit_to_packing = {
@@ -20,6 +20,7 @@ class Quantizer:
         4: "4bit_u8",
         3: "3bit_32",
         2: "2bit_u8",
+        1.58: "1.58bit_u8",  
         1: "1bit_u8",
     }
 
@@ -28,6 +29,7 @@ class Quantizer:
         "4bit_u8": BitPack.pack_4bit_u8,
         "3bit_32": BitPack.pack_3bit_32,
         "2bit_u8": BitPack.pack_2bit_u8,
+        "1.58bit_u8": BitPack.pack_158bit_u8, # BitPack.pack_2bit_u8, 
         "1bit_u8": BitPack.pack_1bit_u8,
     }
 
@@ -36,6 +38,7 @@ class Quantizer:
         "4bit_u8": BitPack.unpack_4bit_u8,
         "3bit_32": BitPack.unpack_3bit_32,
         "2bit_u8": BitPack.unpack_2bit_u8,
+        "1.58bit_u8": BitPack.unpack_158bit_u8,  # BitPack.unpack_2bit_u8, # 
         "1bit_u8": BitPack.unpack_1bit_u8,
     }
 
@@ -44,6 +47,7 @@ class Quantizer:
         "4bit_u8": uint8,
         "3bit_32": int32,
         "2bit_u8": uint8,
+        "1.58bit_u8": uint8,  
         "1bit_u8": uint8,
     }
 
@@ -51,7 +55,7 @@ class Quantizer:
     def quantize(
         cls,
         tensor: Tensor,
-        nbits: int = 4,
+        nbits: int | float = 4,
         channel_wise: bool = True,
         group_size: int = 64,
         optimize: bool = False,
@@ -93,8 +97,12 @@ class Quantizer:
             _min = W.min(axis=axis, keepdim=True)[0]
             _max = W.max(axis=axis, keepdim=True)[0]
 
-        max_v = 2**nbits - 1
-        min_v = 0
+        if nbits == 1.58:
+            max_v = 2
+            min_v = 0
+        else:
+            max_v = 2**nbits - 1
+            min_v = 0
         min_max = [min_v, max_v]
 
         # Note: here we work with the inverse of the scale to avoid division and quantize instead via W*scale + zero, the scale is inverted later on.
@@ -123,7 +131,11 @@ class Quantizer:
             scale.clone(),
             zero.clone(),
         )  # Necessary for fake quantization backprop
-        W_q = torch.round(W * scale + zero).clamp(min_max[0], min_max[1])
+        if nbits == 1.58:
+            W_q = torch.round(W * scale + zero).clamp(min_max[0], min_max[1]) - 1
+            zero -= 1
+        else:
+            W_q = torch.round(W * scale + zero).clamp(min_max[0], min_max[1])
 
         # Store meta-data (we invert the scale for dequantization)
         meta = {
@@ -815,7 +827,7 @@ class HQQLinear(nn.Module):
 
 
 def hqq_base_quant_config(
-    nbits: int = 4,
+    nbits: int | float = 4,
     group_size: int = 64,
     quant_zero: bool = True,
     quant_scale: bool = False,

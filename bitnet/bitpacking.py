@@ -2,10 +2,11 @@ import torch
 from torch import uint8, int8, Tensor
 
 class BitPack:
-     # 2-bit
+    # 1.58-bit -> adapted from HQQ 
     ################################################
+    #
     @staticmethod
-    def check_2bit(W_q: Tensor) -> Tensor:
+    def check_158bit(W_q: Tensor) -> Tensor:
         """
         check if 2-bit quantization is possible
         """
