@@ -3,7 +3,7 @@ from bitpacking import BitPack
 
 def test_bitpacking_2():
     W = torch.randint(-1, 2, (1280,1280), dtype=torch.int8)
-    BitPack.check_2bit(W)
+    BitPack.check_158bit(W)
     print("PASSED")
     
 def test_compile_bitpacking_2():
