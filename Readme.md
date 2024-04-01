@@ -7,4 +7,4 @@
 
 # HQQ -> 1.58
 - [ ] test HQQ -> fork -> 1.58bit 
-- 2bit quant llama / bitsandbytes
+- [ ] 2bit quant llama / bitsandbytes
