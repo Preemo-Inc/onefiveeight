@@ -28,8 +28,9 @@ cd hqq && pip install -e .
 
 | Model                     | Dataset                                                  | Quant    | Groupsize | PPL    |
 |---------------------------|----------------------------------------------------------|----------|-----------|--------|
-| TheBloke/Llama-2-7B-fp16  | wikitext + wikitext_wikitext-2-raw-v1, validation splits | HQQ 1.58 | 16        | 445.03 |
-| TheBloke/Llama-2-7B-fp16  | wikitext + wikitext_wikitext-2-raw-v1, validation splits | HQQ 1.58 | 8         | 113.97 |
-| TheBloke/Llama-2-7B-fp16  | wikitext + wikitext_wikitext-2-raw-v1, validation splits | FP16     | -         | 70.67  |
-| TheBloke/Llama-2-13B-fp16 | wikitext + wikitext_wikitext-2-raw-v1, validation splits | HQQ 1.58 | 16        | 232.75 |
-| TheBloke/Llama-2-13B-fp16 | wikitext + wikitext_wikitext-2-raw-v1, validation splits | HQQ 1.58 | 8         | 165.08 |
+| TheBloke/Llama-2-7B-fp16  | wikitext + wikitext_wikitext-2-raw-v1, validation splits | HQQ 1.58 | 16        | 400.46 |
+| TheBloke/Llama-2-7B-fp16  | wikitext + wikitext_wikitext-2-raw-v1, validation splits | HQQ 1.58 | 8         | 8.69   |
+| TheBloke/Llama-2-7B-fp16  | wikitext + wikitext_wikitext-2-raw-v1, validation splits | FP16     | -         | 5.18   |
+| TheBloke/Llama-2-13B-fp16 | wikitext + wikitext_wikitext-2-raw-v1, validation splits | HQQ 1.58 | 16        | 48.23  |
+| TheBloke/Llama-2-13B-fp16 | wikitext + wikitext_wikitext-2-raw-v1, validation splits | HQQ 1.58 | 8         | 7.2732 |
+
