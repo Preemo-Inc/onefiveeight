@@ -151,7 +151,7 @@ def _ternary_mm_kernel(
     # b_ptrs is set up such that it repeats elements along the K axis n_bits times
     b_ptrs = b_ptr + ((offs_k[:, None] // n_bits) * stride_bk + offs_bn[None, :] * stride_bn)  
     # shifter is used to extract each bit of each element in the int matrix
-    shifter = (offs_k % n_bits) * 2 # 
+    shifter = (offs_k % n_bits)[:, None] * 2 # 
     # shifter = shifter 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -173,7 +173,7 @@ def _ternary_mm_kernel(
         
         # Convert B from int to a.dtype, for each bit in B, 0 becomes -1.0, 1 becomes 1.0
         # b: (BLOCK_SIZE_K, BLOCK_SIZE_N)
-        b = (b >> shifter[:, None]) & 0x3
+        b = (b >> shifter) & 0x3
         # shift b to -1, 0, 1
         b = b.to(a.dtype) - 1
 
@@ -197,6 +197,11 @@ def _ternary_mm_kernel(
     c_ptrs = c_ptr + (stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :])
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptrs, c, mask=c_mask)
+    # c_block_ptr = tl.make_block_ptr(base=c_ptr, shape=(M, N), strides=(stride_cm, stride_cn),
+    #                                 offsets=(pid_m*BLOCK_SIZE_M, pid_n*BLOCK_SIZE_N), block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_N),
+    #                                 order=(1, 0))
+
+    # tl.store(c_block_ptr, c)
 
 
 def bitmat(a, b, n_bits=4, activation=""):
