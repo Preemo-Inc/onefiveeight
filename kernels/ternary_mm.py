@@ -142,10 +142,10 @@ def _ternary_mm_kernel(
     offs_bn = tl.max_contiguous(tl.multiple_of(offs_n, BLOCK_SIZE_N), BLOCK_SIZE_N)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     
-    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-    # a_block_ptr = tl.make_block_ptr(base=a_ptr, shape=(M,K), strides=(stride_am, stride_ak),
-    #                             offsets=(pid_m*BLOCK_SIZE_M, 0), block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_K),
-    #                             order =(1,0))
+    # a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+    a_block_ptr = tl.make_block_ptr(base=a_ptr, shape=(M,K), strides=(stride_am, stride_ak),
+                                offsets=(pid_m*BLOCK_SIZE_M, 0), block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_K),
+                                order =(1,0))
     
     # Adapted from GPTQ-Triton (https://github.com/fpgaminer/GPTQ-triton)
     # b_ptrs is set up such that it repeats elements along the K axis n_bits times
@@ -163,12 +163,12 @@ def _ternary_mm_kernel(
         # Load the next block of A and B, generate a mask by checking the K dimension.
         # If it is out of bounds, set it to 0.
         if EVEN_K:
-            a = tl.load(a_ptrs) 
-            # a = tl.load(a_block_ptr, boundary_check=(0,1))
+            # a = tl.load(a_ptrs) 
+            a = tl.load(a_block_ptr)
             b = tl.load(b_ptrs)
-
         else:
-            a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
+            a = tl.load(a_block_ptr, boundary_check=(0,1))
+            #a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
             b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
         
         # Convert B from int to a.dtype, for each bit in B, 0 becomes -1.0, 1 becomes 1.0
@@ -181,8 +181,8 @@ def _ternary_mm_kernel(
         accumulator += tl.dot(a, b)
         # accumulator += tl.where(b == 0x3, a, tl.where(b == 0x1, -a, 0.0))
         # Advance the ptrs to the next K block.
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        # a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_SIZE_K))
+        # a_ptrs += BLOCK_SIZE_K * stride_ak
+        a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_SIZE_K))
         b_ptrs += (BLOCK_SIZE_K // n_bits) * stride_bk
     # You can fuse arbitrary activation functions here
     # while the accumulator is still in FP32!
