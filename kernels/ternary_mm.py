@@ -1,21 +1,28 @@
-# TODO: https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
-# Inspired by the amazing work on DeltaBit https://github.com/FasterDecoding/BitDelta/tree/main
+# Inspired by the amazing work on:
+# - DeltaBit https://github.com/FasterDecoding/BitDelta/tree/main
+# - BitNet
+# - https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html & IBM FMS
+
+# COPYRIGHT 2024, Gradient.ai Inc. All Rights Reserved.
+# CC-BY-NC-4.0
+
 import torch
 import triton
 import triton.language as tl
 
 
-def pack(x: torch.Tensor):
+def pack(x: torch.Tensor, n_bits: int =4, inplace=False):
     """
     Pack 4 ternary values into uint8.
     
     x: bool tensor (*, K, N)
     return: uint8 tensor (*, K // n_bits, N)
     """
-    n_bits=4
     assert x.shape[-2] % n_bits == 0, "K must be divisible by n_bits"
-    x = x.clone()
-    x[x == -1] = 2
+    if not inplace:
+        x = x.clone()
+    # increment by 1, to get 0, 1, 2 from ternary values
+    x += 1
 
     shift = torch.arange(n_bits, device=x.device) * 2
     shape = x.shape[:-2]
@@ -23,8 +30,13 @@ def pack(x: torch.Tensor):
     x = x << shift[None, None, :, None]
     x = x.sum(-2)
     x = x.view(*shape, *x.shape[-2:])
+    if n_bits==4:
+        return x.to(torch.uint8)
+    elif n_bits==16:
+        return x.to(torch.int32)
+    else:
+        raise NotImplementedError(f"n_bits={n_bits} not implemented")
 
-    return x.to(torch.uint8)
 
 
 
@@ -40,12 +52,10 @@ def unpack(x: torch.Tensor, n_bits=4):
     x = x.view(-1, x.shape[-2], 1, x.shape[-1])
     x = (x >> shift[None, None, :, None]) & 0x3
     x = x.view(*shape, -1, x.shape[-1])
-    # replace 2 with -1
-    x = torch.where(x == 2, torch.tensor(-1, device=x.device), x)
+    # decrement by 1, to get -1, 0, 1
+    x-=1
     return x
 
-import os
-# os.environ["TRITON_INTERPRET"] = "1"
 
 @triton.autotune(
     configs=[
@@ -53,7 +63,7 @@ import os
         triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=8, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 16, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 16, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
 
     ],
     key=['M', 'N', 'K'],
@@ -64,6 +74,7 @@ def _ternary_mm_kernel(
         a_ptr, b_ptr, c_ptr,
         # Matrix dimensions
         M, N, K,
+        n_bits,
         # The stride variables represent how much to increase the ptr by when moving by 1
         # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
         # by to get the element one row down (A has M rows).
@@ -85,15 +96,18 @@ def _ternary_mm_kernel(
     # This is done in a grouped ordering to promote L2 data reuse.
     # See above `L2 Cache Optimizations` section for details.
     pid = tl.program_id(axis=0)
-    n_bits = 4
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = pid // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    GROUP_SIZE_M = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + (pid % GROUP_SIZE_M)
-    pid_n = (pid % num_pid_in_group) // GROUP_SIZE_M
+   
+    total_blocks_m  = tl.cdiv(M, BLOCK_SIZE_M)
+    total_blocks_n  = tl.cdiv(N, BLOCK_SIZE_N)
+    total_blocks_k = tl.cdiv(K, BLOCK_SIZE_K)
+    
+    num_blocks_in_group  = GROUP_SIZE_M * total_blocks_n 
+    group_id = pid // num_blocks_in_group 
+    
+    group_size = min(total_blocks_m - group_id * GROUP_SIZE_M, GROUP_SIZE_M)
+
+    pid_m = group_id * GROUP_SIZE_M + (pid % group_size)
+    pid_n = (pid % num_blocks_in_group) // (group_size)
 
     # ----------------------------------------------------------
     # Create pointers for the first blocks of A and B.
@@ -106,9 +120,13 @@ def _ternary_mm_kernel(
     offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_am = tl.max_contiguous(tl.multiple_of(offs_m, BLOCK_SIZE_M), BLOCK_SIZE_M)
     offs_bn = tl.max_contiguous(tl.multiple_of(offs_n, BLOCK_SIZE_N), BLOCK_SIZE_N)
-    
     offs_k = tl.arange(0, BLOCK_SIZE_K)
+    
     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+    # a_block_ptr = tl.make_block_ptr(base=a_ptr, shape=(M,K), strides=(stride_am, stride_ak),
+    #                             offsets=(pid_m*BLOCK_SIZE_M, 0), block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_K),
+    #                             order =(1,0))
+    
     # Adapted from GPTQ-Triton (https://github.com/fpgaminer/GPTQ-triton)
     # b_ptrs is set up such that it repeats elements along the K axis n_bits times
     b_ptrs = b_ptr + ((offs_k[:, None] // n_bits) * stride_bk + offs_bn[None, :] * stride_bn)  
@@ -121,26 +139,25 @@ def _ternary_mm_kernel(
     # of fp32 values for higher accuracy.
     # `accumulator` will be converted back to fp16 after the loop.
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+    for k in range(0, total_blocks_k):
         # Load the next block of A and B, generate a mask by checking the K dimension.
         # If it is out of bounds, set it to 0.
-        a = tl.load(a_ptrs) #, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
-        # b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0)
+        a = tl.load(a_ptrs) 
+        # a = tl.load(a_block_ptr, boundary_check=(0,1))
         b = tl.load(b_ptrs)
 
         # Convert B from int to a.dtype, for each bit in B, 0 becomes -1.0, 1 becomes 1.0
         # b: (BLOCK_SIZE_K, BLOCK_SIZE_N)
         b = (b >> shifter[:, None]) & 0x3
-        # map the value 2 -> -1
-        b = tl.where(b == 0x2, -1, b)
-        b = b.to(a.dtype)
+        # shift b to -1, 0, 1
+        b = b.to(a.dtype) - 1
+
         # We accumulate along the K dimension.
         accumulator += tl.dot(a, b)
-        # accumulator += tl.where(b == 2.0, -a, 0.0)
-        # accumulator += tl.where(b == 1.0, a, 0.0)
+        # accumulator += tl.where(b == 0x3, a, tl.where(b == 0x1, -a, 0.0))
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
-        # b_ptrs += BLOCK_SIZE_K * stride_bk
+        # a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_SIZE_K))
         b_ptrs += (BLOCK_SIZE_K // n_bits) * stride_bk
     # You can fuse arbitrary activation functions here
     # while the accumulator is still in FP32!
@@ -152,24 +169,23 @@ def _ternary_mm_kernel(
     # Write back the block of the output matrix C with masks.
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    c_ptrs = c_ptr + (stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :])
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptrs, c, mask=c_mask)
 
 
-def bitmat(a, b, activation=""):
+def bitmat(a, b, n_bits=4, activation=""):
     """
         a: float tensor (M, K)
         b: int tensor (K//n_bits, N)
         n_bits: int, number of bits that each element in b represents
     """
     # Check constraints.
-    int_per_2_bits=4
-    assert a.shape[1] == b.shape[0]* int_per_2_bits, "Incompatible dimensions"
+    assert a.shape[1] == b.shape[0]* n_bits, "Incompatible dimensions"
     assert a.is_contiguous(), "A must be contiguous"
     assert b.is_contiguous(), "B must be contiguous"
-    assert b.dtype == torch.uint8, "B must be a packed tenary->uint8 tensor"
-    assert int_per_2_bits in [4, 8, 16, 32], "n_bits must be 4, 8, 16, 32"
+    assert b.dtype == (torch.uint8 if n_bits==4 else torch.int32), "B must be a packed tenary->uint8 tensor"
+    assert n_bits in [4, 8, 16, 32], "n_bits must be 4, 8, 16, 32"
     M, K = a.shape
     _, N = b.shape
 
@@ -185,7 +201,7 @@ def bitmat(a, b, activation=""):
     _ternary_mm_kernel[grid](
         a, b, c,
         M, N, K,
-        # int_per_2_bits,
+        n_bits,
         a.stride(0), a.stride(1),
         b.stride(0), b.stride(1),
         c.stride(0), c.stride(1),
@@ -226,18 +242,19 @@ def matmul_f16(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
     """
     return (A.to(torch.float16) @ B.to(torch.float16))
 
+@torch.inference_mode()
 def main():
-
+    N_BITS=4
     # Example usage
-    M, N, K = 32, 24, 128
+    M, N, K = 32, 16, 128
     A = torch.rand((M,K), device='cuda', dtype=torch.float16) * 10
     B = torch.randint(-1, 2, (K, N), device='cuda', dtype=torch.int8)
     # Perform the operation
     def assert_equal(A, B):
         A = A.clone()
         B = B.clone()
-        assert (B - unpack(pack(B)) == 0).all()
-        assert torch.allclose(matmul_f32(A,B), bitmat(A, pack(B)), atol=1e-3, rtol=1e-3)
+        assert (B - unpack(pack(B, n_bits=N_BITS), n_bits=N_BITS) == 0).all()
+        assert torch.allclose(matmul_f32(A,B), bitmat(A, pack(B, n_bits=N_BITS), n_bits=N_BITS), atol=1e-3, rtol=1e-3)
 
     assert_equal(A, B)
     print("Success for small tensors.")
@@ -265,14 +282,14 @@ def main():
         A = torch.rand((M,K), device='cuda', dtype=torch.float32)       
         B = torch.randint(-1, 2, (K, N), device='cuda', dtype=torch.int8)
         assert_equal(A.to(torch.float16), B)
-        B_pack = pack(B)
+        B_pack = pack(B, n_bits=N_BITS)
         
         
         quantiles = [0.5, 0.2, 0.8]
         if provider == 'torch-native':
             ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul_f16(A,B), quantiles=quantiles)
         if provider == 'triton':
-            ms, min_ms, max_ms = triton.testing.do_bench(lambda: bitmat(A, B_pack), quantiles=quantiles)
+            ms, min_ms, max_ms = triton.testing.do_bench(lambda: bitmat(A, B_pack, n_bits=N_BITS), quantiles=quantiles)
         
         return ms, max_ms,  min_ms
 
