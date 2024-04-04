@@ -60,14 +60,33 @@ def unpack(x: torch.Tensor, n_bits=4):
 @triton.autotune(
     configs=[
         # triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=8),
-        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=8, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=3,
+                      num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4,
+                      num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4,
+                      num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4,
+                      num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4,
+                      num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4,
+                      num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5,
+                      num_warps=2),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5,
+                      num_warps=2),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 8}, num_stages=8, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 16, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
 
     ],
     key=['M', 'N', 'K'],
 )
+@triton.heuristics({
+    'EVEN_K': lambda args: args['K'] % args['BLOCK_SIZE_K'] == 0,
+})
 @triton.jit
 def _ternary_mm_kernel(
         # Pointers to matrices
@@ -83,6 +102,7 @@ def _ternary_mm_kernel(
         stride_cm, stride_cn,
         # Meta-parameters
         BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
+        EVEN_K: tl.constexpr,
         GROUP_SIZE_M: tl.constexpr,
         ACTIVATION: tl.constexpr,
 ):
@@ -142,10 +162,15 @@ def _ternary_mm_kernel(
     for k in range(0, total_blocks_k):
         # Load the next block of A and B, generate a mask by checking the K dimension.
         # If it is out of bounds, set it to 0.
-        a = tl.load(a_ptrs) 
-        # a = tl.load(a_block_ptr, boundary_check=(0,1))
-        b = tl.load(b_ptrs)
+        if EVEN_K:
+            a = tl.load(a_ptrs) 
+            # a = tl.load(a_block_ptr, boundary_check=(0,1))
+            b = tl.load(b_ptrs)
 
+        else:
+            a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
+            b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        
         # Convert B from int to a.dtype, for each bit in B, 0 becomes -1.0, 1 becomes 1.0
         # b: (BLOCK_SIZE_K, BLOCK_SIZE_N)
         b = (b >> shifter[:, None]) & 0x3
@@ -244,7 +269,7 @@ def matmul_f16(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
 
 @torch.inference_mode()
 def main():
-    N_BITS=4
+    N_BITS=16
     # Example usage
     M, N, K = 32, 16, 128
     A = torch.rand((M,K), device='cuda', dtype=torch.float16) * 10
@@ -262,7 +287,7 @@ def main():
     @triton.testing.perf_report(
         triton.testing.Benchmark(
             x_names=['N'],  # argument names to use as an x-axis for the plot
-            x_vals=[2**i for i in range(2, 12)],  # different possible values for `x_name`
+            x_vals=[2**i for i in range(2, 13)],  # different possible values for `x_name`
             line_arg='provider',  # argument name whose value corresponds to a different line in the plot
             line_vals=[
                 'triton',
@@ -275,7 +300,7 @@ def main():
             styles=[('blue', '-'), ('green', '-')], # ('green', '--')],  # line styles
             ylabel="ms",  # label name for the y-axis
             plot_name="add-performance",  # name for the plot. Used also as a file name for saving the plot.
-            args={'M': 1024, "K":1024},  # 'M': 4096 # values for function arguments not in `x_names` and `y_name`
+            args={'M': 1024, "K":8192},  # 'M': 4096 # values for function arguments not in `x_names` and `y_name`
         ))
     def benchmark(M, N, K, provider):
         assert N % 4 == 0, "N must be a multiple of 4" 
