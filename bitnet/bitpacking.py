@@ -48,4 +48,11 @@ class BitPack:
         tmp[3 * _step : 4 * _step] = W_q & 0b00000011
 
         return tmp.to(int8) - 1
-    
+
+if __name__ == "__main__":
+    # test 1.58-bit
+    W = torch.randint(-1, 2, (8, 8)).to(torch.int8)
+    W_q = BitPack.pack_158bit_u8(W)
+    W_Dq = BitPack.unpack_158bit_u8(W_q)
+    assert torch.allclose(W, W_Dq), f"Expected W == W_Dq but got {W} != {W_Dq}"
+    print("1.58-bit test passed")
