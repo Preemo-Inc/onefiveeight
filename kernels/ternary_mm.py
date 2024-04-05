@@ -62,11 +62,7 @@ def unpack(x: torch.Tensor, n_bits=4):
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=8),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=3,
-                      num_warps=8),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4,
-                      num_warps=4),
+
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4,
                       num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4,
@@ -75,14 +71,14 @@ def unpack(x: torch.Tensor, n_bits=4):
                       num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4,
                       num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=6,
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5,
                       num_warps=2),
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5,
                       num_warps=2),
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 8}, num_stages=8, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        # triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 16, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=8, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 16, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
 
     ],
     key=['M', 'N', 'K'],
@@ -144,7 +140,6 @@ def _ternary_mm_kernel(
     # offs_am = tl.max_contiguous(tl.multiple_of(offs_m, BLOCK_SIZE_M), BLOCK_SIZE_M)
     offs_bn = tl.max_contiguous(tl.multiple_of(offs_n, BLOCK_SIZE_N), BLOCK_SIZE_N)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
-    offs_k_fake = tl.arange(0, BLOCK_SIZE_K //n_bits)
     
     # a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     a_block_ptr = tl.make_block_ptr(base=a_ptr, shape=(M,K), strides=(stride_am, stride_ak),
@@ -153,9 +148,7 @@ def _ternary_mm_kernel(
     
     # Adapted from GPTQ-Triton (https://github.com/fpgaminer/GPTQ-triton)
     # b_ptrs is set up such that it repeats elements along the K axis n_bits times
-    # https://github.com/openai/triton/issues/1426
-    b_ptrs = b_ptr + ((offs_k_fake[:, None]) * stride_bk + offs_bn[None, :] * stride_bn)
-    
+    b_ptrs = b_ptr + ((offs_k[:, None] // n_bits) * stride_bk + offs_bn[None, :] * stride_bn)  
     # shifter is used to extract each bit of each element in the int matrix
     shifter = (offs_k % n_bits)[:, None] * 2 # 
     # shifter = shifter 
@@ -176,15 +169,7 @@ def _ternary_mm_kernel(
         else:
             a = tl.load(a_block_ptr, boundary_check=(0,1))
             # a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
-            b = tl.load(b_ptrs, mask=offs_k_fake[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-        # a has shape (BLOCK_SIZE_M, BLOCK_SIZE_K)
-        # b has shape (BLOCK_SIZE_K, BLOCK_SIZE_N)
-        b = b.T
-        b = tl.interleave(tl.interleave(b,b),tl.interleave(b,b)).T # joins along the last axis
-        
-        # d = tl.dot(tl.full((4,3),1, dtype=tl.float16) , a)
-        # b = tl.dot(tl.full((5,5),1, dtype=tl.uint8) , b)
-        # 
+            b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
         # Convert B from int to a.dtype, for each bit in B, 0 becomes -1.0, 1 becomes 1.0
         # b: (BLOCK_SIZE_K, BLOCK_SIZE_N)
         b = (b >> shifter) & 0x3
@@ -197,7 +182,7 @@ def _ternary_mm_kernel(
         # Advance the ptrs to the next K block.
         # a_ptrs += BLOCK_SIZE_K * stride_ak
         a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_SIZE_K))
-        b_ptrs += (BLOCK_SIZE_K) * stride_bk
+        b_ptrs += (BLOCK_SIZE_K // n_bits) * stride_bk
     # You can fuse arbitrary activation functions here
     # while the accumulator is still in FP32!
     # if ACTIVATION == "leaky_relu":
@@ -298,7 +283,8 @@ def main():
         A = A.clone()
         B = B.clone()
         assert (B - unpack(pack(B, n_bits=N_BITS), n_bits=N_BITS) == 0).all()
-        # assert torch.allclose(matmul_f32(A,B), bitmat(A, pack(B, n_bits=N_BITS), n_bits=N_BITS), atol=1e-3, rtol=1e-3)
+        bitmat(A, pack(B, n_bits=N_BITS), n_bits=N_BITS)
+        assert torch.allclose(matmul_f32(A,B), bitmat(A, pack(B, n_bits=N_BITS), n_bits=N_BITS), atol=1e-3, rtol=1e-3)
 
     assert_equal(A, B)
     print("Success for small tensors.")
