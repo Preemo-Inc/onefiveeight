@@ -2,9 +2,12 @@
 # - DeltaBit https://github.com/FasterDecoding/BitDelta/tree/main
 # - BitNet
 # - https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html & IBM FMS
+# - https://github.com/ROCm/triton/blob/triton-mlir/python/tutorials/11-grouped-gemm.pyw
+
 
 # COPYRIGHT 2024, Gradient.ai Inc. All Rights Reserved.
 # CC-BY-NC-4.0
+
 
 import torch
 import triton
@@ -59,11 +62,7 @@ def unpack(x: torch.Tensor, n_bits=4):
 
 @triton.autotune(
     configs=[
-        # triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=8),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=3,
-                      num_warps=8),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4,
-                      num_warps=4),
+
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4,
                       num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4,
@@ -93,7 +92,7 @@ def _ternary_mm_kernel(
         a_ptr, b_ptr, c_ptr,
         # Matrix dimensions
         M, N, K,
-        n_bits,
+        n_bits: tl.constexpr,
         # The stride variables represent how much to increase the ptr by when moving by 1
         # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
         # by to get the element one row down (A has M rows).
@@ -110,6 +109,9 @@ def _ternary_mm_kernel(
     A has shape (M, K), float16
     B has shape (K//n_bits, N), uint8, packed 
     C has shape (M, N),
+    
+    NEEDS triton>3.0.0 to work / tl.join()/tl.interleave()
+    install torch, then add triton from source.
     """
     # -----------------------------------------------------------
     # Map program ids `pid` to the block of C it should compute.
@@ -140,7 +142,7 @@ def _ternary_mm_kernel(
     offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     # offs_am = tl.max_contiguous(tl.multiple_of(offs_m, BLOCK_SIZE_M), BLOCK_SIZE_M)
     offs_bn = tl.max_contiguous(tl.multiple_of(offs_n, BLOCK_SIZE_N), BLOCK_SIZE_N)
-    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    offs_k = tl.arange(0, BLOCK_SIZE_K// n_bits)
     
     # a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     a_block_ptr = tl.make_block_ptr(base=a_ptr, shape=(M,K), strides=(stride_am, stride_ak),
@@ -149,9 +151,9 @@ def _ternary_mm_kernel(
     
     # Adapted from GPTQ-Triton (https://github.com/fpgaminer/GPTQ-triton)
     # b_ptrs is set up such that it repeats elements along the K axis n_bits times
-    b_ptrs = b_ptr + ((offs_k[:, None] // n_bits) * stride_bk + offs_bn[None, :] * stride_bn)  
+    b_ptrs = b_ptr + ((offs_k[:, None] ) * stride_bk + offs_bn[None, :] * stride_bn)  
     # shifter is used to extract each bit of each element in the int matrix
-    shifter = (offs_k % n_bits)[:, None] * 2 # 
+    shifter = (tl.arange(0, BLOCK_SIZE_K) % n_bits)[:, None] * 2 # 
     # shifter = shifter 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -171,9 +173,13 @@ def _ternary_mm_kernel(
             a = tl.load(a_block_ptr, boundary_check=(0,1))
             # a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
             b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-        
         # Convert B from int to a.dtype, for each bit in B, 0 becomes -1.0, 1 becomes 1.0
         # b: (BLOCK_SIZE_K, BLOCK_SIZE_N)
+        b = b.T
+        b = tl.interleave(tl.interleave(b,b), tl.interleave(b,b)).T
+        # b = tl.interleave(b, b) # .reshape(b.shape[-1:] + [2 * b.shape[-1]])
+        # tl.interleave(b,b)
+        # b = b.reshape(BLOCK_SIZE_K, BLOCK_SIZE_N, n_bits)
         b = (b >> shifter) & 0x3
         # shift b to -1, 0, 1
         b = b.to(a.dtype) - 1
@@ -184,7 +190,7 @@ def _ternary_mm_kernel(
         # Advance the ptrs to the next K block.
         # a_ptrs += BLOCK_SIZE_K * stride_ak
         a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_SIZE_K))
-        b_ptrs += (BLOCK_SIZE_K // n_bits) * stride_bk
+        b_ptrs += (BLOCK_SIZE_K) * stride_bk
     # You can fuse arbitrary activation functions here
     # while the accumulator is still in FP32!
     # if ACTIVATION == "leaky_relu":
@@ -240,9 +246,9 @@ def bitmat(a, b, n_bits=4, activation=""):
     )
     try:
         c[0][0].item()
-    except RuntimeError:
+    except RuntimeError as ex:
         raise RuntimeError(
-            "Illegal memory access, it means that the kernel failed most probably to OOM, try to reduce batch size or matrix size.")
+            "Illegal memory access, it means that the kernel failed most probably to OOM, try to reduce batch size or matrix size.") from ex
 
     return c
 
@@ -275,7 +281,7 @@ def matmul_f16(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
 
 @torch.inference_mode()
 def main():
-    N_BITS=16
+    N_BITS=4
     # Example usage
     M, N, K = 32, 16, 128
     A = torch.rand((M,K), device='cuda', dtype=torch.float16) * 10
@@ -285,7 +291,8 @@ def main():
         A = A.clone()
         B = B.clone()
         assert (B - unpack(pack(B, n_bits=N_BITS), n_bits=N_BITS) == 0).all()
-        assert torch.allclose(matmul_f32(A,B), bitmat(A, pack(B, n_bits=N_BITS), n_bits=N_BITS), atol=1e-3, rtol=1e-3)
+        bitmat(A, pack(B, n_bits=N_BITS), n_bits=N_BITS)
+        torch.testing.assert_close(matmul_f32(A,B), bitmat(A, pack(B, n_bits=N_BITS), n_bits=N_BITS), atol=1e-3, rtol=1e-3)
 
     assert_equal(A, B)
     print("Success for small tensors.")
@@ -293,7 +300,7 @@ def main():
     @triton.testing.perf_report(
         triton.testing.Benchmark(
             x_names=['N'],  # argument names to use as an x-axis for the plot
-            x_vals=[2**i for i in range(2, 13)],  # different possible values for `x_name`
+            x_vals=[2**i for i in range(5, 10)],  # different possible values for `x_name`
             line_arg='provider',  # argument name whose value corresponds to a different line in the plot
             line_vals=[
                 'triton',
@@ -306,7 +313,7 @@ def main():
             styles=[('blue', '-'), ('green', '-')], # ('green', '--')],  # line styles
             ylabel="ms",  # label name for the y-axis
             plot_name="add-performance",  # name for the plot. Used also as a file name for saving the plot.
-            args={'M': 1024, "K":8192},  # 'M': 4096 # values for function arguments not in `x_names` and `y_name`
+            args={'M': 512, "K":128},  # 'M': 4096 # values for function arguments not in `x_names` and `y_name`
         ))
     def benchmark(M, N, K, provider):
         assert N % 4 == 0, "N must be a multiple of 4" 
